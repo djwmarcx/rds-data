@@ -1,5 +1,6 @@
 import { RDSDataService } from 'aws-sdk';
 import { SqlParametersList } from 'aws-sdk/clients/rdsdataservice';
+import { captureRejectionSymbol } from 'events';
 
 export interface RDSDataOptions {
   secretArn: string;
@@ -78,6 +79,34 @@ export class RDSData {
       });
     }
     return this.rds;
+  }
+
+
+  public async batchQuery(sql: string, params?: RDSDataParameters[], transactionId?: string): Promise<RDSDataResponse[]> {
+    const parameterSets = params?.map(RDSData.formatParameters);
+    return new Promise((resolve, reject) => {
+      let queryParameters: RDSDataService.Types.BatchExecuteStatementRequest = {
+        secretArn: this.config.secretArn,
+        resourceArn: this.config.resourceArn,
+        database: this.config.database,
+        parameterSets: parameterSets,
+        sql,
+      };
+      if (transactionId) {
+        queryParameters = { ...queryParameters, transactionId };
+      }
+
+      this.getConnection()
+        .batchExecuteStatement(queryParameters)
+        .promise()
+        .then((response) => {
+          const result = RDSData.batchResultFormat(response);
+          resolve(result);
+        })
+        .catch((error) => {
+          reject(error);
+        });
+    });
   }
 
   public async query(sql: string, params?: RDSDataParameters, transactionId?: string): Promise<RDSDataResponse> {
@@ -161,6 +190,22 @@ export class RDSData {
       formatType(key, params[key], getType(params[key])),
     );
     return parameters;
+  }
+
+
+  private static batchResultFormat(responses: RDSDataService.Types.BatchExecuteStatementResponse): RDSDataResponse[] {
+
+    if (!responses.updateResults) {
+      return [];
+    }
+    return responses.updateResults.reduce<RDSDataResponse[]>((carry, response) => {
+      const insertId =
+        response.generatedFields && response.generatedFields.length > 0 ? response.generatedFields[0].longValue : 0;
+      const columns: RDSDataColumn[] = [];
+      const data: { [key: string]: RDSDataResponseValue }[] = [];
+      carry.push({ data, columns, numberOfRecordsUpdated: 0, insertId });
+      return carry;
+    }, []);
   }
 
   private static resultFormat(response: RDSDataService.Types.ExecuteStatementResponse): RDSDataResponse {
